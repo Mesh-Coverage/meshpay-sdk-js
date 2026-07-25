@@ -1,7 +1,4 @@
-/**
- * Customers Module
- * Create, read, update, and delete customers
- */
+/** Customer endpoints — /api/client/customers */
 
 import { MeshpayClient } from '../client';
 import {
@@ -9,57 +6,64 @@ import {
   CreateCustomerRequest,
   UpdateCustomerRequest,
   KYCUpgradeRequest,
-  PaginatedResponse,
-  RequestConfig
+  Paginated,
+  PaginationParams
 } from '../types';
 
-export class CustomersModule extends MeshpayClient {
-  constructor(config: RequestConfig) {
-    super(config);
-  }
+export class Customers {
+  constructor(private readonly client: MeshpayClient) {}
 
-  /**
-   * Create a new customer
-   */
+  /** POST /api/client/customers */
   create(request: CreateCustomerRequest): Promise<Customer> {
-    return this.post<Customer>('/api/client/customers', request);
+    return this.client.post<Customer>('/api/client/customers', request);
+  }
+
+  /** GET /api/client/customers */
+  list(params: PaginationParams = {}): Promise<Paginated<Customer>> {
+    return this.client.get<Paginated<Customer>>('/api/client/customers', {
+      limit: params.limit,
+      offset: params.offset
+    });
+  }
+
+  /** GET /api/client/customers/:id */
+  get(customerId: string): Promise<Customer> {
+    return this.client.get<Customer>(
+      `/api/client/customers/${encodeURIComponent(customerId)}`
+    );
+  }
+
+  /** PATCH /api/client/customers/:id */
+  update(
+    customerId: string,
+    request: UpdateCustomerRequest
+  ): Promise<Customer> {
+    return this.client.patch<Customer>(
+      `/api/client/customers/${encodeURIComponent(customerId)}`,
+      request
+    );
+  }
+
+  /** DELETE /api/client/customers/:id */
+  async remove(customerId: string): Promise<void> {
+    await this.client.delete<void>(
+      `/api/client/customers/${encodeURIComponent(customerId)}`
+    );
   }
 
   /**
-   * List all customers
+   * POST /api/client/customers/:id/kyc-upgrade
+   *
+   * Supplying `bvn` also requires `date_of_birth`; MeshPay verifies the BVN
+   * with the identity provider and checks the date of birth matches. Your
+   * business is charged the per-validation fee either way.
    */
-  list(limit: number = 20, offset: number = 0): Promise<PaginatedResponse<Customer>> {
-    const query = this.encodeQuery({ limit, offset });
-    return this.get<PaginatedResponse<Customer>>(`/api/client/customers${query}`);
-  }
-
-  /**
-   * Get a specific customer by ID
-   */
-  getCustomer(customerId: string): Promise<Customer> {
-    return this.get<Customer>(`/api/client/customers/${customerId}`);
-  }
-
-  /**
-   * Update a customer
-   */
-  update(customerId: string, request: UpdateCustomerRequest): Promise<Customer> {
-    return this.patch<Customer>(`/api/client/customers/${customerId}`, request);
-  }
-
-  /**
-   * Delete a customer
-   */
-  deleteCustomer(customerId: string): Promise<void> {
-    return this.doDelete(`/api/client/customers/${customerId}`).then(() => undefined);
-  }
-
-  /**
-   * Upgrade customer KYC level
-   */
-  upgradeKYC(customerId: string, request: KYCUpgradeRequest): Promise<Customer> {
-    return this.post<Customer>(
-      `/api/client/customers/${customerId}/kyc-upgrade`,
+  upgradeKYC(
+    customerId: string,
+    request: KYCUpgradeRequest
+  ): Promise<Customer> {
+    return this.client.post<Customer>(
+      `/api/client/customers/${encodeURIComponent(customerId)}/kyc-upgrade`,
       request
     );
   }

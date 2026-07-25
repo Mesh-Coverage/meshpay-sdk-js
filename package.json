@@ -7,11 +7,12 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "jest --passWithNoTests",
+    "test": "jest",
     "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
     "lint": "eslint src/**/*.ts",
     "prepare": "npm run build",
-    "prepublishOnly": "npm run build && npm run lint"
+    "prepublishOnly": "npm run build && npm run lint && npm test"
   },
   "keywords": [
     "meshpay",
@@ -21,7 +22,8 @@
     "nigeria",
     "transfers",
     "virtual-accounts",
-    "bill-payment"
+    "bill-payment",
+    "payment-links"
   ],
   "author": "Mesh Coverage Resources",
   "license": "MIT",
@@ -30,8 +32,8 @@
     "README.md",
     "LICENSE"
   ],
-  "dependencies": {
-    "node-fetch": "^2.6.11"
+  "engines": {
+    "node": ">=18"
   },
   "devDependencies": {
     "@types/jest": "^29.5.0",

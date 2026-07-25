@@ -1,182 +1,139 @@
 /**
- * Basic Meshpay SDK Usage Examples
+ * MeshPay SDK usage examples.
+ *
+ * Run against sandbox:
+ *   MESHPAY_APP_ID=... MESHPAY_SECRET=... npx ts-node examples/basic.ts
  */
 
-import Meshpay, { MeshpaySDKError } from '../src/index';
+import { Meshpay, MeshpayError, SANDBOX_BASE_URL } from '../src/index';
 
-// Initialize the SDK
 const meshpay = new Meshpay({
-  apiKey: process.env.MESHPAY_API_KEY || 'your-api-key',
-  apiSecret: process.env.MESHPAY_API_SECRET || 'your-api-secret'
+  appId: process.env.MESHPAY_APP_ID ?? 'your-app-id',
+  secret: process.env.MESHPAY_SECRET ?? 'your-secret',
+  baseURL: SANDBOX_BASE_URL
 });
 
-// ============================================================================
-// Customer Examples
-// ============================================================================
+/** Unique per run so the examples can be re-run without 409s. */
+const runId = Date.now();
 
-async function customerExamples() {
-  console.log('\n=== Customer Examples ===\n');
-
-  try {
-    // Create a customer
-    const newCustomer = await meshpay.customers.create({
-      firstName: 'Alice',
-      lastName: 'Johnson',
-      email: 'alice@example.com',
-      phoneNumber: '+2348012345678',
-      address: '456 Oak Street',
-      city: 'Lagos'
-    });
-    console.log('✓ Customer created:', newCustomer.id);
-
-    // List customers
-    const customers = await meshpay.customers.list(10, 0);
-    console.log(`✓ Found ${customers.total} customers, showing ${customers.data.length}`);
-
-    // Get specific customer
-    const customer = await meshpay.customers.getCustomer(newCustomer.id);
-    console.log('✓ Customer retrieved:', customer.firstName, customer.lastName);
-
-    // Update customer
-    const updated = await meshpay.customers.update(newCustomer.id, {
-      email: 'alice.johnson@example.com'
-    });
-    console.log('✓ Customer updated, new email:', updated.email);
-  } catch (error) {
-    console.error('✗ Customer error:', error);
-  }
+async function balanceExample(): Promise<void> {
+  const balance = await meshpay.accounts.getBalance();
+  console.log('Balance:', balance.available, balance.currency);
+  console.log('  in kobo:', balance.available_kobo);
 }
 
-// ============================================================================
-// Virtual Account Examples
-// ============================================================================
+async function customerExample(): Promise<string> {
+  const customer = await meshpay.customers.create({
+    external_ref: `user-${runId}`,
+    email: 'alice@example.com',
+    phone: '+2348012345678',
+    first_name: 'Alice',
+    last_name: 'Johnson'
+  });
+  console.log('Created customer:', customer.id, customer.external_ref);
 
-async function accountExamples() {
-  console.log('\n=== Virtual Account Examples ===\n');
+  const page = await meshpay.customers.list({ limit: 5 });
+  console.log(`Customers: ${page.data.length} of ${page.total}`);
 
-  try {
-    // Issue a virtual account
-    const account = await meshpay.accounts.issueVirtualAccount({
-      accountName: 'Business Account',
-      customerId: 'created_customer_id'
-    });
-    console.log('✓ Virtual account issued:', account.accountNumber);
-    console.log('  Bank:', account.bankName);
-
-    // List accounts
-    const accounts = await meshpay.accounts.listVirtualAccounts(5, 0);
-    console.log(`✓ Found ${accounts.total} accounts`);
-
-    // Get account details
-    const details = await meshpay.accounts.getVirtualAccount(account.id);
-    console.log('✓ Account status:', details.status);
-
-    // Get available banks
-    const banks = await meshpay.accounts.listBanks();
-    console.log(`✓ ${banks.length} supported banks`);
-
-    // Resolve account name
-    const resolved = await meshpay.accounts.resolveBank({
-      accountNumber: '0123456789',
-      bankCode: '011'
-    });
-    console.log('✓ Resolved account name:', resolved.accountName);
-
-    // Get balance
-    const balance = await meshpay.accounts.getBalance();
-    console.log('✓ Account balance:', balance.balance, balance.currency);
-  } catch (error) {
-    console.error('✗ Account error:', error);
-  }
+  return customer.id;
 }
 
-// ============================================================================
-// Payment Examples
-// ============================================================================
+async function virtualAccountExample(customerId: string): Promise<void> {
+  const account = await meshpay.accounts.issue({
+    account_ref: `va-${runId}`,
+    account_name: 'Alice Johnson',
+    customer_id: customerId
+  });
+  console.log('Virtual account:', account.account_number, account.bank_name);
 
-async function paymentExamples() {
-  console.log('\n=== Payment Examples ===\n');
+  const banks = await meshpay.accounts.listBanks();
+  console.log(`Supported banks: ${banks.length}`);
+}
 
+async function transferExample(): Promise<void> {
+  // Resolve the destination name before sending anything.
+  const resolved = await meshpay.accounts.resolveBank({
+    account_number: '0123456789',
+    bank_code: '011'
+  });
+  console.log('Sending to:', resolved.account_name);
+
+  const amountKobo = 50_000; // ₦500.00
+
+  if (!(await meshpay.accounts.hasSufficientBalance(amountKobo))) {
+    console.log('Insufficient balance — skipping transfer');
+    return;
+  }
+
+  const transfer = await meshpay.payments.createTransfer({
+    account_number: resolved.account_number,
+    bank_code: '011',
+    account_name: resolved.account_name,
+    amount_kobo: amountKobo,
+    narration: 'SDK example transfer',
+    trx_reference: `transfer-${runId}`
+  });
+  console.log('Transfer:', transfer.reference, transfer.status);
+}
+
+async function chargeExample(): Promise<void> {
+  // 1. Merchant creates the payment link.
+  const charge = await meshpay.charges.create({
+    payer_email: 'payer@example.com',
+    amount_kobo: 250_000, // ₦2,500.00
+    trx_reference: `invoice-${runId}`,
+    callback_url: 'https://example.com/payment/complete',
+    metadata: { invoice_id: String(runId) }
+  });
+  console.log('Charge:', charge.reference, charge.status);
+  console.log('  pay at: https://app.meshpay.ng/pay/' + charge.reference);
+
+  // 2. What the payer's browser sees — no credentials involved.
+  const view = await meshpay.charges.public_.get(charge.reference);
+  console.log('Payment page:', view.business_name, view.amount_kobo);
+
+  // 3. Issue the one-off account to transfer into.
+  const account = await meshpay.charges.public_.issueAccount(charge.reference);
+  console.log('Pay into:', account.account_number, account.bank_name);
+  console.log('  expires:', account.expires_at);
+
+  // 4. The page polls this until it flips to 'paid'.
+  const status = await meshpay.charges.public_.getStatus(charge.reference);
+  console.log('Status:', status.status);
+}
+
+async function billExample(): Promise<void> {
+  const plans = await meshpay.bills.listDataPlans('MTN');
+  console.log(`MTN data plans: ${plans.length}`);
+
+  const payment = await meshpay.bills.pay({
+    type: 'airtime',
+    amount: '100.00',
+    phone_number: '+2348012345678',
+    network: 'MTN',
+    trx_reference: `airtime-${runId}`
+  });
+  console.log('Airtime:', payment.reference, payment.status);
+}
+
+async function main(): Promise<void> {
   try {
-    // Create a transfer
-    const transfer = await meshpay.payments.createTransfer({
-      amount: 50000, // 500 NGN
-      destinationAccountNumber: '0123456789',
-      destinationBankCode: '011',
-      description: 'Test transfer',
-      metadata: {
-        orderId: 'ORD-12345'
+    await balanceExample();
+    const customerId = await customerExample();
+    await virtualAccountExample(customerId);
+    await transferExample();
+    await chargeExample();
+    await billExample();
+  } catch (err) {
+    if (err instanceof MeshpayError) {
+      console.error(`API error ${err.statusCode}: ${err.message}`);
+      if (err.isDuplicate) {
+        console.error('  a trx_reference was reused');
       }
-    });
-    console.log('✓ Transfer created:', transfer.reference);
-    console.log('  Status:', transfer.status);
-
-    // List transactions
-    const transactions = await meshpay.payments.listTransactions(10, 0);
-    console.log(`✓ Found ${transactions.total} transactions`);
-
-    // Get specific transaction
-    const tx = await meshpay.payments.getTransaction(transfer.reference);
-    console.log('✓ Transaction details:');
-    console.log('  Amount:', tx.amount);
-    console.log('  Status:', tx.status);
-  } catch (error) {
-    if (error instanceof MeshpaySDKError) {
-      console.error(`✗ API Error [${error.code}]:`, error.message);
     } else {
-      console.error('✗ Payment error:', error);
+      throw err;
     }
   }
 }
 
-// ============================================================================
-// Bill Payment Examples
-// ============================================================================
-
-async function billExamples() {
-  console.log('\n=== Bill Payment Examples ===\n');
-
-  try {
-    // Get data plans
-    const plans = await meshpay.bills.fetchDataPlans('MTN');
-    console.log(`✓ Found ${plans.length} data plans for MTN`);
-
-    // Get electricity providers
-    const providers = await meshpay.bills.fetchElectricityProviders();
-    console.log(`✓ Found ${providers.length} electricity providers`);
-
-    // Pay a bill
-    const payment = await meshpay.bills.payBill({
-      billType: 'DATA',
-      provider: 'MTN',
-      amount: 5000,
-      phoneNumber: '+2348012345678',
-      planId: 'plan-123'
-    });
-    console.log('✓ Bill payment created:', payment.reference);
-    console.log('  Status:', payment.status);
-  } catch (error) {
-    console.error('✗ Bill payment error:', error);
-  }
-}
-
-// ============================================================================
-// Main
-// ============================================================================
-
-async function main() {
-  console.log('Meshpay SDK Examples\n');
-  console.log('API Key:', meshpay.customers['apiKey'] ? '✓ Configured' : '✗ Missing');
-
-  await customerExamples();
-  await accountExamples();
-  await paymentExamples();
-  await billExamples();
-
-  console.log('\n✓ All examples completed!');
-}
-
-main().catch(error => {
-  console.error('Fatal error:', error);
-  process.exit(1);
-});
+void main();

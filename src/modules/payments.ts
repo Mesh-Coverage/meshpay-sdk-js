@@ -1,45 +1,48 @@
-/**
- * Payments Module
- * Create transfers and manage transactions
- */
+/** Transfer and transaction endpoints — /api/client */
 
 import { MeshpayClient } from '../client';
 import {
   Transaction,
   CreateTransferRequest,
-  PaginatedResponse,
-  RequestConfig
+  Paginated,
+  PaginationParams
 } from '../types';
 
-export class PaymentsModule extends MeshpayClient {
-  constructor(config: RequestConfig) {
-    super(config);
-  }
+export class Payments {
+  constructor(private readonly client: MeshpayClient) {}
 
   /**
-   * Create a new transfer
+   * POST /api/client/bank/transfers — outbound bank transfer.
+   *
+   * `trx_reference` is your idempotency key and is required: a retry with a
+   * reference already used by this business fails with 409 instead of
+   * sending the money twice.
    */
   createTransfer(request: CreateTransferRequest): Promise<Transaction> {
-    return this.post<Transaction>('/api/client/bank/transfers', request);
+    return this.client.post<Transaction>(
+      '/api/client/bank/transfers',
+      request
+    );
   }
 
-  /**
-   * List all transactions
-   */
+  /** GET /api/client/transactions */
   listTransactions(
-    limit: number = 20,
-    offset: number = 0
-  ): Promise<PaginatedResponse<Transaction>> {
-    const query = this.encodeQuery({ limit, offset });
-    return this.get<PaginatedResponse<Transaction>>(
-      `/api/client/transactions${query}`
+    params: PaginationParams = {}
+  ): Promise<Paginated<Transaction>> {
+    return this.client.get<Paginated<Transaction>>(
+      '/api/client/transactions',
+      { limit: params.limit, offset: params.offset }
     );
   }
 
   /**
-   * Get a specific transaction by reference
+   * GET /api/client/transactions/:reference
+   *
+   * Accepts either MeshPay's own `reference` or your `trx_reference`.
    */
   getTransaction(reference: string): Promise<Transaction> {
-    return this.get<Transaction>(`/api/client/transactions/${reference}`);
+    return this.client.get<Transaction>(
+      `/api/client/transactions/${encodeURIComponent(reference)}`
+    );
   }
 }

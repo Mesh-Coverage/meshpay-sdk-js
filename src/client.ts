@@ -1,279 +1,245 @@
 /**
- * Meshpay API Client Base
- * Handles authentication, request/response, and error handling
+ * HTTP transport for the MeshPay client API.
+ *
+ * Implements the five-header signed-request scheme the API enforces in
+ * internal/middleware.RequireAPIKey:
+ *
+ *   x-app-id      your API key's app id
+ *   x-timestamp   Unix milliseconds, must be within the server's skew window
+ *   x-nonce       unique per request; replays are rejected
+ *   x-signature   hex(HMAC-SHA256(secret, "{appId}.{timestamp}.{nonce}"))
+ *
+ * Note the request body is deliberately NOT part of the signature — this
+ * matches internal/auth.ComputeSignature.
  */
 
-import * as crypto from 'crypto';
-import { MeshpaySDKError, ApiResponse, RequestConfig } from './types';
+import { createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import {
+  MeshpayConfig,
+  MeshpayError,
+  ErrorBody,
+  PRODUCTION_BASE_URL
+} from './types';
+
+export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
 
 export interface RequestOptions {
-  method: 'GET' | 'POST' | 'PATCH' | 'DELETE' | 'PUT';
+  method: HttpMethod;
   path: string;
-  body?: any;
-  headers?: Record<string, string>;
+  body?: unknown;
+  query?: Record<string, unknown>;
+  /** Skip request signing — used for the public /api/pay endpoints. */
+  unsigned?: boolean;
+}
+
+/**
+ * Computes a MeshPay request signature.
+ *
+ * Exported so callers can sign requests made outside this SDK (for example
+ * from a language-agnostic HTTP client) with the identical scheme.
+ */
+export function computeSignature(
+  secret: string,
+  appId: string,
+  timestamp: string,
+  nonce: string
+): string {
+  return createHmac('sha256', secret)
+    .update(`${appId}.${timestamp}.${nonce}`)
+    .digest('hex');
+}
+
+/**
+ * Verifies a webhook delivery.
+ *
+ * MeshPay signs the raw request body with your business's webhook secret and
+ * sends the result hex-encoded in the `X-MeshPay-Signature` header. Pass the
+ * body exactly as received — parsing and re-serialising it will change the
+ * bytes and invalidate the signature.
+ */
+export function verifyWebhookSignature(
+  rawBody: string | Buffer,
+  signature: string,
+  secret: string
+): boolean {
+  const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+  const a = Buffer.from(expected, 'utf8');
+  const b = Buffer.from(signature ?? '', 'utf8');
+  if (a.length !== b.length) {
+    return false;
+  }
+  return timingSafeEqual(a, b);
 }
 
 export class MeshpayClient {
-  private baseURL: string;
-  private apiKey: string;
-  private apiSecret: string;
-  private timeout: number;
-  private retries: number;
+  readonly baseURL: string;
+  private readonly appId: string;
+  private readonly secret: string;
+  private readonly timeout: number;
+  private readonly retries: number;
 
-  constructor(config: RequestConfig) {
-    this.baseURL = config.baseURL || 'https://api.meshpay.app';
-    this.apiKey = config.apiKey;
-    this.apiSecret = config.apiSecret;
-    this.timeout = config.timeout || 30000;
-    this.retries = config.retries || 3;
-
-    if (!this.apiKey || !this.apiSecret) {
-      throw new MeshpaySDKError(
-        'INVALID_CONFIG',
-        400,
-        'API key and secret are required'
-      );
+  constructor(config: MeshpayConfig) {
+    if (!config?.appId || !config?.secret) {
+      throw new MeshpayError('appId and secret are required', 0);
     }
+    this.appId = config.appId;
+    this.secret = config.secret;
+    this.baseURL = (config.baseURL ?? PRODUCTION_BASE_URL).replace(/\/+$/, '');
+    this.timeout = config.timeout ?? 30_000;
+    this.retries = config.retries ?? 3;
   }
 
-  /**
-   * Generate HMAC-SHA256 signature for request authentication
-   */
-  private generateSignature(
-    method: string,
-    path: string,
-    timestamp: string,
-    nonce: string,
-    body?: any
-  ): string {
-    let bodyString = '';
-    if (body && (method === 'POST' || method === 'PATCH' || method === 'PUT')) {
-      bodyString = JSON.stringify(body);
-    }
-
-    const message = `${method}\n${path}\n${timestamp}\n${nonce}\n${bodyString}`;
-    return crypto
-      .createHmac('sha256', this.apiSecret)
-      .update(message)
-      .digest('base64');
-  }
-
-  /**
-   * Generate a nonce for request signing
-   */
-  private generateNonce(): string {
-    return crypto.randomBytes(16).toString('hex');
-  }
-
-  /**
-   * Execute an HTTP request
-   */
-  async request<T = any>(options: RequestOptions): Promise<T> {
+  /** Builds the signed auth headers for a single request. */
+  private authHeaders(): Record<string, string> {
     const timestamp = Date.now().toString();
-    const nonce = this.generateNonce();
-    const signature = this.generateSignature(
-      options.method,
-      options.path,
-      timestamp,
-      nonce,
-      options.body
-    );
-
-    const url = `${this.baseURL}${options.path}`;
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      'X-Meshpay-API-Key': this.apiKey,
-      'X-Meshpay-Signature': signature,
-      'X-Meshpay-Timestamp': timestamp,
-      'X-Meshpay-Nonce': nonce,
-      'User-Agent': 'Meshpay-SDK-JS/1.0',
-      ...options.headers
+    const nonce = randomBytes(16).toString('hex');
+    return {
+      'x-app-id': this.appId,
+      'x-timestamp': timestamp,
+      'x-nonce': nonce,
+      'x-signature': computeSignature(this.secret, this.appId, timestamp, nonce)
     };
+  }
 
-    let lastError: Error | null = null;
+  async request<T>(options: RequestOptions): Promise<T> {
+    const url = this.baseURL + options.path + encodeQuery(options.query);
+    const hasBody = options.body !== undefined && options.method !== 'GET';
+
+    let lastError: unknown;
 
     for (let attempt = 1; attempt <= this.retries; attempt++) {
+      // Re-sign every attempt: the timestamp must stay inside the skew
+      // window and the nonce must not repeat.
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        ...(options.unsigned ? {} : this.authHeaders())
+      };
+      if (hasBody) {
+        headers['Content-Type'] = 'application/json';
+      }
+
       try {
-        const response = await this.performFetch(url, {
+        const response = await this.fetchWithTimeout(url, {
           method: options.method,
           headers,
-          body: options.body ? JSON.stringify(options.body) : undefined,
-          timeout: this.timeout
+          body: hasBody ? JSON.stringify(options.body) : undefined
         });
 
         if (!response.ok) {
-          const error = await this.handleErrorResponse(response);
-          throw error;
+          throw await toApiError(response);
         }
 
-        const data = await response.json();
-        return this.handleSuccessResponse<T>(data);
-      } catch (error) {
-        lastError = error as Error;
+        return (await parseBody(response)) as T;
+      } catch (err) {
+        lastError = err;
 
-        // Don't retry on 4xx errors (client errors)
-        if (error instanceof MeshpaySDKError && error.statusCode < 500) {
-          throw error;
+        // 4xx is a problem with the request itself — retrying is pointless
+        // and, for writes, unsafe.
+        if (err instanceof MeshpayError && err.isClientError) {
+          throw err;
         }
-
-        // Wait before retrying on 5xx or network errors
         if (attempt < this.retries) {
-          await this.delay(Math.pow(2, attempt - 1) * 1000);
+          await delay(2 ** (attempt - 1) * 1000);
         }
       }
     }
 
-    throw lastError || new MeshpaySDKError(
-      'REQUEST_FAILED',
-      500,
-      'Request failed after retries'
+    if (lastError instanceof MeshpayError) {
+      throw lastError;
+    }
+    throw new MeshpayError(
+      `Request failed after ${this.retries} attempts: ${describe(lastError)}`,
+      0,
+      { body: lastError }
     );
   }
 
-  /**
-   * Perform the actual fetch request
-   */
-  private performFetch(
+  private async fetchWithTimeout(
     url: string,
-    options: RequestInit & { timeout?: number }
+    init: RequestInit
   ): Promise<Response> {
-    return new Promise((resolve, reject) => {
-      const timeoutId = setTimeout(
-        () => reject(new Error('Request timeout')),
-        options.timeout || 30000
-      );
-
-      // Use node-fetch or native fetch
-      const fetchFn = typeof fetch === 'undefined' ? require('node-fetch') : fetch;
-
-      fetchFn(url, options)
-        .then((response: Response) => {
-          clearTimeout(timeoutId);
-          resolve(response);
-        })
-        .catch((error: Error) => {
-          clearTimeout(timeoutId);
-          reject(error);
-        });
-    });
-  }
-
-  /**
-   * Handle successful API responses
-   */
-  private handleSuccessResponse<T>(data: any): T {
-    if (data && typeof data === 'object') {
-      // If the response has a 'data' property, return that
-      if ('data' in data) {
-        return data.data as T;
-      }
-      // Otherwise return the whole response
-      return data as T;
-    }
-    return data;
-  }
-
-  /**
-   * Handle error API responses
-   */
-  private async handleErrorResponse(response: Response): Promise<Error> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeout);
     try {
-      const errorData = await response.json() as Record<string, any>;
-      const message = errorData.message || errorData.error || 'API Error';
-      const code = errorData.code || `HTTP_${response.status}`;
-
-      return new MeshpaySDKError(
-        code,
-        response.status,
-        message,
-        errorData.errors || errorData.details
-      );
-    } catch {
-      return new MeshpaySDKError(
-        `HTTP_${response.status}`,
-        response.status,
-        response.statusText || 'API Error'
-      );
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new MeshpayError(`Request timed out after ${this.timeout}ms`, 0);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
     }
   }
 
-  /**
-   * Delay utility for retries
-   */
-  private delay(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+  get<T>(path: string, query?: Record<string, unknown>): Promise<T> {
+    return this.request<T>({ method: 'GET', path, query });
   }
 
-  /**
-   * GET request helper
-   */
-  protected get<T = any>(path: string, headers?: Record<string, string>): Promise<T> {
-    return this.request<T>({
-      method: 'GET',
-      path,
-      headers
-    });
+  post<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>({ method: 'POST', path, body });
   }
 
-  /**
-   * POST request helper
-   */
-  protected post<T = any>(
-    path: string,
-    body: any,
-    headers?: Record<string, string>
-  ): Promise<T> {
-    return this.request<T>({
-      method: 'POST',
-      path,
-      body,
-      headers
-    });
+  patch<T>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>({ method: 'PATCH', path, body });
   }
 
-  /**
-   * PATCH request helper
-   */
-  protected patch<T = any>(
-    path: string,
-    body: any,
-    headers?: Record<string, string>
-  ): Promise<T> {
-    return this.request<T>({
-      method: 'PATCH',
-      path,
-      body,
-      headers
-    });
+  delete<T>(path: string): Promise<T> {
+    return this.request<T>({ method: 'DELETE', path });
   }
+}
 
-  /**
-   * DELETE request helper
-   */
-  protected doDelete<T = any>(
-    path: string,
-    headers?: Record<string, string>
-  ): Promise<T> {
-    return this.request<T>({
-      method: 'DELETE',
-      path,
-      headers
-    });
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function encodeQuery(query?: Record<string, unknown>): string {
+  if (!query) {
+    return '';
   }
-
-  /**
-   * Encode query parameters
-   */
-  protected encodeQuery(params: Record<string, any>): string {
-    const query = Object.entries(params)
-      .filter(([, value]) => value !== undefined && value !== null)
-      .map(([key, value]) => {
-        const encodedKey = encodeURIComponent(key);
-        const encodedValue = encodeURIComponent(String(value));
-        return `${encodedKey}=${encodedValue}`;
-      })
-      .join('&');
-
-    return query ? `?${query}` : '';
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value !== undefined && value !== null) {
+      params.append(key, String(value));
+    }
   }
+  const encoded = params.toString();
+  return encoded ? `?${encoded}` : '';
+}
+
+/** 204s and empty bodies resolve to undefined rather than throwing. */
+async function parseBody(response: Response): Promise<unknown> {
+  if (response.status === 204) {
+    return undefined;
+  }
+  const text = await response.text();
+  if (!text) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+async function toApiError(response: Response): Promise<MeshpayError> {
+  const body = await parseBody(response);
+  const envelope = body as Partial<ErrorBody> | undefined;
+  const message =
+    (typeof envelope?.message === 'string' && envelope.message) ||
+    response.statusText ||
+    `HTTP ${response.status}`;
+  return new MeshpayError(message, response.status, {
+    error: envelope?.error,
+    body
+  });
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }

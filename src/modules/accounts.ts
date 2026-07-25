@@ -1,105 +1,102 @@
-/**
- * Accounts Module
- * Virtual account management, linking, and balance queries
- */
+/** Virtual account, bank and balance endpoints — /api/client */
 
 import { MeshpayClient } from '../client';
 import {
   VirtualAccount,
-  IssueVARequest,
+  IssueVirtualAccountRequest,
+  SetAccountStatusRequest,
   LinkAccountRequest,
-  SetVAStatusRequest,
+  LinkAccountResponse,
   Bank,
-  BankResolutionRequest,
-  BankResolutionResponse,
-  BalanceResponse,
-  PaginatedResponse,
-  RequestConfig
+  ResolveBankRequest,
+  ResolvedBankAccount,
+  Balance,
+  AccountStatus,
+  Paginated,
+  PaginationParams
 } from '../types';
 
-export class AccountsModule extends MeshpayClient {
-  constructor(config: RequestConfig) {
-    super(config);
-  }
+export class Accounts {
+  constructor(private readonly client: MeshpayClient) {}
 
-  /**
-   * Issue a new virtual account
-   */
-  issueVirtualAccount(request: IssueVARequest): Promise<VirtualAccount> {
-    return this.post<VirtualAccount>('/api/client/virtual-accounts', request);
-  }
-
-  /**
-   * List virtual accounts
-   */
-  listVirtualAccounts(
-    limit: number = 20,
-    offset: number = 0
-  ): Promise<PaginatedResponse<VirtualAccount>> {
-    const query = this.encodeQuery({ limit, offset });
-    return this.get<PaginatedResponse<VirtualAccount>>(
-      `/api/client/virtual-accounts${query}`
-    );
-  }
-
-  /**
-   * Get a specific virtual account by ID
-   */
-  getVirtualAccount(accountId: string): Promise<VirtualAccount> {
-    return this.get<VirtualAccount>(`/api/client/virtual-accounts/${accountId}`);
-  }
-
-  /**
-   * Set virtual account status (active/inactive)
-   */
-  setVirtualAccountStatus(
-    accountId: string,
-    request: SetVAStatusRequest
-  ): Promise<VirtualAccount> {
-    return this.patch<VirtualAccount>(
-      `/api/client/virtual-accounts/${accountId}/status`,
+  /** POST /api/client/virtual-accounts */
+  issue(request: IssueVirtualAccountRequest): Promise<VirtualAccount> {
+    return this.client.post<VirtualAccount>(
+      '/api/client/virtual-accounts',
       request
     );
   }
 
-  /**
-   * Link virtual account to settlement account
-   */
-  linkAccount(accountId: string, request: LinkAccountRequest): Promise<VirtualAccount> {
-    return this.post<VirtualAccount>(
-      `/api/client/virtual-accounts/${accountId}/link`,
-      request
+  /** GET /api/client/virtual-accounts */
+  list(params: PaginationParams = {}): Promise<Paginated<VirtualAccount>> {
+    return this.client.get<Paginated<VirtualAccount>>(
+      '/api/client/virtual-accounts',
+      { limit: params.limit, offset: params.offset }
     );
   }
 
-  /**
-   * Unlink virtual account from settlement account
-   */
-  unlinkAccount(accountId: string): Promise<VirtualAccount> {
-    return this.post<VirtualAccount>(
-      `/api/client/virtual-accounts/${accountId}/unlink`,
-      {}
+  /** GET /api/client/virtual-accounts/:id */
+  get(accountId: string): Promise<VirtualAccount> {
+    return this.client.get<VirtualAccount>(
+      `/api/client/virtual-accounts/${encodeURIComponent(accountId)}`
     );
   }
 
-  /**
-   * Get list of supported banks
-   */
+  /** PATCH /api/client/virtual-accounts/:id/status */
+  setStatus(accountId: string, status: AccountStatus): Promise<VirtualAccount> {
+    const body: SetAccountStatusRequest = { status };
+    return this.client.patch<VirtualAccount>(
+      `/api/client/virtual-accounts/${encodeURIComponent(accountId)}/status`,
+      body
+    );
+  }
+
+  /** POST /api/client/virtual-accounts/:id/link — link the account to a customer. */
+  link(accountId: string, customerId: string): Promise<LinkAccountResponse> {
+    const body: LinkAccountRequest = { customer_id: customerId };
+    return this.client.post<LinkAccountResponse>(
+      `/api/client/virtual-accounts/${encodeURIComponent(accountId)}/link`,
+      body
+    );
+  }
+
+  /** POST /api/client/virtual-accounts/:id/unlink */
+  unlink(accountId: string): Promise<LinkAccountResponse> {
+    return this.client.post<LinkAccountResponse>(
+      `/api/client/virtual-accounts/${encodeURIComponent(accountId)}/unlink`
+    );
+  }
+
+  /** GET /api/client/banks */
   listBanks(): Promise<Bank[]> {
-    return this.get<Bank[]>('/api/client/banks');
+    return this.client.get<Bank[]>('/api/client/banks');
+  }
+
+  /** POST /api/client/banks/resolve — NUBAN name enquiry. */
+  resolveBank(request: ResolveBankRequest): Promise<ResolvedBankAccount> {
+    return this.client.post<ResolvedBankAccount>(
+      '/api/client/banks/resolve',
+      request
+    );
   }
 
   /**
-   * Resolve bank account details
+   * GET /api/client/balance
+   *
+   * Returns the business's spendable wallet balance, e.g.
+   * `{ available_kobo: 14979500, available: "149795.00", currency: "NGN" }`.
    */
-  resolveBank(request: BankResolutionRequest): Promise<BankResolutionResponse> {
-    return this.post<BankResolutionResponse>('/api/client/banks/resolve', request);
+  getBalance(): Promise<Balance> {
+    return this.client.get<Balance>('/api/client/balance');
   }
 
-  /**
-   * Get account balance
-   */
-  getBalance(): Promise<BalanceResponse> {
-    return this.get<BalanceResponse>('/api/client/balance');
+  /** Convenience: the available balance in kobo. */
+  async getAvailableKobo(): Promise<number> {
+    return (await this.getBalance()).available_kobo;
+  }
+
+  /** Convenience: true when the wallet holds at least `amountKobo`. */
+  async hasSufficientBalance(amountKobo: number): Promise<boolean> {
+    return (await this.getAvailableKobo()) >= amountKobo;
   }
 }

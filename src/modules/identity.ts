@@ -1,24 +1,28 @@
-/**
- * Identity Module
- * Identity verification endpoints
- */
+/** Identity verification endpoints — /api/client/identity */
 
 import { MeshpayClient } from '../client';
 import {
-  BVNVerification,
-  IdentityVerificationRequest,
-  RequestConfig
+  VerifyBVNRequest,
+  VerifyBusinessRequest,
+  VerificationResult
 } from '../types';
 
-export class IdentityModule extends MeshpayClient {
-  constructor(config: RequestConfig) {
-    super(config);
+export class Identity {
+  constructor(private readonly client: MeshpayClient) {}
+
+  /** POST /api/client/identity/bvn */
+  verifyBVN(request: VerifyBVNRequest): Promise<VerificationResult> {
+    return this.client.post<VerificationResult>(
+      '/api/client/identity/bvn',
+      request
+    );
   }
 
-  /**
-   * Verify BVN
-   */
-  verifyBVN(request: IdentityVerificationRequest): Promise<BVNVerification> {
-    return this.post<BVNVerification>('/api/client/identity/verify-bvn', request);
+  /** POST /api/client/identity/business — corporate/CAC verification. */
+  verifyBusiness(request: VerifyBusinessRequest): Promise<VerificationResult> {
+    return this.client.post<VerificationResult>(
+      '/api/client/identity/business',
+      request
+    );
   }
 }
