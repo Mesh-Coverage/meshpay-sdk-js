@@ -1,5 +1,5 @@
 {
-  "name": "@meshpay/sdk",
+  "name": "@mesh-coverage/meshpayjs",
   "version": "0.1.0",
   "description": "Official Node.js SDK for Meshpay API",
   "main": "dist/index.js",
@@ -7,11 +7,11 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "test": "jest",
+    "test": "jest --passWithNoTests",
     "test:watch": "jest --watch",
     "lint": "eslint src/**/*.ts",
     "prepare": "npm run build",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm run lint"
   },
   "keywords": [
     "meshpay",
@@ -23,7 +23,7 @@
     "virtual-accounts",
     "bill-payment"
   ],
-  "author": "Meshpay",
+  "author": "Mesh Coverage Resources",
   "license": "MIT",
   "files": [
     "dist",

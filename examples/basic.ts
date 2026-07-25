@@ -34,7 +34,7 @@ async function customerExamples() {
     console.log(`✓ Found ${customers.total} customers, showing ${customers.data.length}`);
 
     // Get specific customer
-    const customer = await meshpay.customers.get(newCustomer.id);
+    const customer = await meshpay.customers.getCustomer(newCustomer.id);
     console.log('✓ Customer retrieved:', customer.firstName, customer.lastName);
 
     // Update customer

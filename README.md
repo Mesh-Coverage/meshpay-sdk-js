@@ -14,19 +14,19 @@ Official Node.js SDK for the Meshpay API. This SDK provides a simple and conveni
 ## Installation
 
 ```bash
-npm install @meshpay/sdk
+npm install @mesh-coverage/meshpayjs
 
 # or with yarn
-yarn add @meshpay/sdk
+yarn add @mesh-coverage/meshpayjs
 
 # or with pnpm
-pnpm add @meshpay/sdk
+pnpm add @mesh-coverage/meshpayjs
 ```
 
 ## Quick Start
 
 ```typescript
-import Meshpay from '@meshpay/sdk';
+import Meshpay from '@mesh-coverage/meshpayjs';
 
 const meshpay = new Meshpay({
   apiKey: 'your-api-key',
@@ -224,7 +224,7 @@ if (verification.isValid) {
 The SDK throws `MeshpaySDKError` for API errors. Handle them with try-catch:
 
 ```typescript
-import { MeshpaySDKError } from '@meshpay/sdk';
+import { MeshpaySDKError } from '@mesh-coverage/meshpayjs';
 
 try {
   const customer = await meshpay.customers.get('invalid-id');
@@ -287,7 +287,7 @@ import Meshpay, {
   VirtualAccount,
   Transaction,
   MeshpaySDKError
-} from '@meshpay/sdk';
+} from '@mesh-coverage/meshpayjs';
 
 const meshpay = new Meshpay({ apiKey: '...', apiSecret: '...' });
 const customer: Customer = await meshpay.customers.get('id');
@@ -332,7 +332,7 @@ function verifyWebhookSignature(
 ### Complete Payment Flow
 
 ```typescript
-import Meshpay, { MeshpaySDKError } from '@meshpay/sdk';
+import Meshpay, { MeshpaySDKError } from '@mesh-coverage/meshpayjs';
 
 const meshpay = new Meshpay({
   apiKey: 'sk_live_...',
