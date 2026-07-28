@@ -230,8 +230,9 @@ export interface Transaction {
 export interface CreateTransferRequest {
   account_number: string;
   bank_code: string;
-  account_name?: string;
+  account_name: string;
   amount_kobo: number;
+  sender_name: string;
   narration?: string;
   /**
    * Your idempotency key. Required — unique per business. A retry with the

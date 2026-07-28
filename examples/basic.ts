@@ -71,7 +71,8 @@ async function transferExample(): Promise<void> {
     account_name: resolved.account_name,
     amount_kobo: amountKobo,
     narration: 'SDK example transfer',
-    trx_reference: `transfer-${runId}`
+    trx_reference: `transfer-${runId}`,
+    sender_name: 'Sender\'s Name'
   });
   console.log('Transfer:', transfer.reference, transfer.status);
 }

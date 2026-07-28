@@ -165,7 +165,9 @@ describe('errors', () => {
         account_number: '0123456789',
         bank_code: '011',
         amount_kobo: 1000,
-        trx_reference: 'dup'
+        trx_reference: 'dup',
+        sender_name: 'Test Sender',
+        account_name: 'Test Recipient'
       });
     } catch (err) {
       const e = err as MeshpayError;
