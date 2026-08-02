@@ -3,8 +3,12 @@ import { createServer, IncomingMessage, Server, ServerResponse } from 'http';
 import { AddressInfo } from 'net';
 
 import { Meshpay } from '../index';
-import { MeshpayError } from '../types';
-import { computeSignature, verifyWebhookSignature } from '../client';
+import { MeshpayError, WebhookVerificationError } from '../types';
+import {
+  computeSignature,
+  verifyWebhookSignature,
+  constructWebhookEvent
+} from '../client';
 
 const APP_ID = 'test-app';
 const SECRET = 'test-secret';
@@ -142,6 +146,53 @@ describe('requests', () => {
     });
   });
 
+  it('surfaces payment_url on a created charge', async () => {
+    handler = (_req, res) =>
+      json(res, 201, {
+        id: 'c1',
+        reference: 'chg_abc123',
+        status: 'pending',
+        amount_kobo: 250_000,
+        payment_url: 'https://app.meshpay.ng/pay/chg_abc123'
+      });
+
+    const charge = await client().charges.create({
+      payer_email: 'p@example.com',
+      amount_kobo: 250_000,
+      trx_reference: 'inv-2'
+    });
+
+    expect(charge.payment_url).toBe('https://app.meshpay.ng/pay/chg_abc123');
+  });
+
+  it('surfaces settlement details on a single charge read', async () => {
+    handler = (_req, res) =>
+      json(res, 200, {
+        reference: 'chg_abc123',
+        status: 'paid',
+        payment_url: 'https://app.meshpay.ng/pay/chg_abc123',
+        transaction_reference: 'in_9f2c',
+        session_id: '000017240412'
+      });
+
+    const charge = await client().charges.get('chg_abc123');
+
+    expect(charge.transaction_reference).toBe('in_9f2c');
+    expect(charge.session_id).toBe('000017240412');
+  });
+
+  it('passes the category filter through to the transactions query', async () => {
+    handler = (_req, res) =>
+      json(res, 200, { data: [], total: 0, limit: 20, offset: 0 });
+
+    await client().payments.listTransactions({
+      limit: 10,
+      category: 'TRANSFER'
+    });
+
+    expect(last().url).toBe('/api/client/transactions?limit=10&category=TRANSFER');
+  });
+
   it('resolves 204 responses to undefined', async () => {
     handler = (_req, res) => res.writeHead(204).end();
 
@@ -224,5 +275,124 @@ describe('verifyWebhookSignature', () => {
     expect(verifyWebhookSignature(body, signature, 'wrong')).toBe(false);
     expect(verifyWebhookSignature(body, 'deadbeef', secret)).toBe(false);
     expect(verifyWebhookSignature(body, '', secret)).toBe(false);
+  });
+});
+
+describe('constructWebhookEvent', () => {
+  const secret = 'whsec';
+  const sign = (b: string): string =>
+    createHmac('sha256', secret).update(b).digest('hex');
+
+  it('verifies and narrows an inflow.success event', () => {
+    const raw = JSON.stringify({
+      event: 'inflow.success',
+      timestamp: 1_700_000_000,
+      data: {
+        reference: 'in_9f2c',
+        trx_reference: 'nomba_tx_1',
+        category: 'INFLOW',
+        status: 'SUCCESS',
+        amount_kobo: 500_000,
+        fee_kobo: 5_000,
+        currency: 'NGN',
+        settled_at: '2026-07-25T08:00:00Z',
+        session_id: '000017240412',
+        account_ref: 'customer-4821-va',
+        counterparty: { provider: 'nomba', sender_name: 'Jane Doe' }
+      }
+    });
+
+    const event = constructWebhookEvent(raw, sign(raw), secret);
+
+    expect(event.event).toBe('inflow.success');
+    if (event.event === 'inflow.success') {
+      // Narrowed to TransactionWebhookData.
+      expect(event.data.account_ref).toBe('customer-4821-va');
+      expect(event.data.counterparty?.sender_name).toBe('Jane Doe');
+      expect(event.data.session_id).toBe('000017240412');
+    }
+    expect(event.timestamp).toBe(1_700_000_000);
+  });
+
+  it('narrows charge.success to its own payload shape', () => {
+    const raw = JSON.stringify({
+      event: 'charge.success',
+      timestamp: 1_700_000_000,
+      data: {
+        reference: 'chg_abc123',
+        trx_reference: 'invoice-2291',
+        amount_kobo: 250_000,
+        transaction: 'in_9f2c',
+        callback_url: 'https://example.com/done'
+      }
+    });
+
+    const event = constructWebhookEvent(raw, sign(raw), secret);
+
+    if (event.event === 'charge.success') {
+      expect(event.data.transaction).toBe('in_9f2c');
+      expect(event.data.callback_url).toBe('https://example.com/done');
+    } else {
+      throw new Error('expected charge.success');
+    }
+  });
+
+  it('exposes failure_reason on bill.failed', () => {
+    const raw = JSON.stringify({
+      event: 'bill.failed',
+      timestamp: 1_700_000_000,
+      data: {
+        reference: 'bill_1',
+        trx_reference: 'airtime-8891',
+        category: 'BILL',
+        status: 'FAILED',
+        amount_kobo: 10_000,
+        fee_kobo: 0,
+        currency: 'NGN',
+        settled_at: null,
+        metadata: { failure_reason: 'provider rejected' }
+      }
+    });
+
+    const event = constructWebhookEvent(raw, sign(raw), secret);
+
+    if (event.event === 'bill.failed') {
+      expect(event.data.metadata?.failure_reason).toBe('provider rejected');
+      expect(event.data.settled_at).toBeNull();
+    } else {
+      throw new Error('expected bill.failed');
+    }
+  });
+
+  it('accepts a Buffer body', () => {
+    const raw = JSON.stringify({
+      event: 'transfer.success',
+      timestamp: 1,
+      data: {}
+    });
+
+    expect(
+      constructWebhookEvent(Buffer.from(raw), sign(raw), secret).event
+    ).toBe('transfer.success');
+  });
+
+  it('throws on a bad signature before parsing', () => {
+    const raw = JSON.stringify({ event: 'transfer.success', data: {} });
+
+    expect(() => constructWebhookEvent(raw, 'deadbeef', secret)).toThrow(
+      WebhookVerificationError
+    );
+  });
+
+  it('throws on a correctly signed but malformed body', () => {
+    const notJson = 'not json';
+    expect(() =>
+      constructWebhookEvent(notJson, sign(notJson), secret)
+    ).toThrow(/not valid JSON/);
+
+    const wrongShape = JSON.stringify({ hello: 'world' });
+    expect(() =>
+      constructWebhookEvent(wrongShape, sign(wrongShape), secret)
+    ).toThrow(/not a MeshPay event envelope/);
   });
 });

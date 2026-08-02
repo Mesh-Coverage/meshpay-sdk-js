@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-02
+### Added
+
+- `Charge.payment_url` — the link to hand the payer, returned on every
+  merchant-facing charge response. Build links from this rather than
+  concatenating the reference yourself.
+- `Charge.transaction_reference` and `Charge.session_id`, returned on a
+  single-charge read once paid. `transaction_reference` is the value
+  `payments.getTransaction` accepts; the pre-existing `transaction_id` is an
+  internal uuid and is not.
+- Typed webhook payloads: `MeshpayWebhookEvent` (a union discriminated on
+  `event`), `WebhookEventName`, `TransactionWebhookData`, `BillWebhookData`,
+  `ChargeWebhookData`, `WebhookEnvelope` and the `WebhookDataFor<E>` helper.
+- `constructWebhookEvent(rawBody, signature, secret)` — verifies a delivery
+  and returns it as a typed event, throwing `WebhookVerificationError` on a
+  bad signature or malformed body. Preferred over calling
+  `verifyWebhookSignature` and `JSON.parse` separately.
+- `Transaction.stamp_duty_kobo` and `Transaction.session_id`, and a typed
+  `Counterparty` replacing the untyped record.
+- `payments.listTransactions({ category })` filter.
+- `examples/webhooks.ts`.
+
 ## [0.1.0] - 2026-07-25
 
 Initial release, verified against the meshpay-v2 API's client surface

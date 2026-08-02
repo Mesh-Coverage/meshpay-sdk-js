@@ -125,9 +125,16 @@ const transfer = await meshpay.payments.createTransfer({
 
 const { data } = await meshpay.payments.listTransactions({ limit: 50 });
 
+// Filter by category
+const bills = await meshpay.payments.listTransactions({ category: 'BILL' });
+
 // Accepts MeshPay's reference or your own trx_reference
 const txn = await meshpay.payments.getTransaction('payout-1042');
 ```
+
+On an outbound transfer the wallet movement is `amount_kobo + fee_kobo + stamp_duty_kobo`. Stamp duty is statutory, levied by the provider and passed through at cost, so it's tracked separately from `fee_kobo` (MeshPay's own charge) rather than folded into it. `net_amount_kobo` is the total of all three.
+
+`session_id` is the provider's NIBSS reference — what the payer's or recipient's own bank shows them, and what you quote when tracing a payment with the banks.
 
 ### Charges (payment links)
 
@@ -142,12 +149,25 @@ const charge = await meshpay.charges.create({
   metadata: { invoice_id: '2291' }
 });
 
-// Send the payer to your page, or MeshPay's:
-// https://app.meshpay.ng/pay/{charge.reference}
+// Hand this to the payer — don't build the URL yourself.
+console.log(charge.payment_url);
+// https://app.meshpay.ng/pay/chg_abc123
 
 const { data } = await meshpay.charges.list({ limit: 20 });
 const one = await meshpay.charges.get(charge.reference);
 ```
+
+`payment_url` is returned on every merchant-facing charge response. It's absent only if no payment base URL is configured server-side, which means charges can't be paid at all — worth alerting on rather than falling back to a hand-built URL.
+
+A single-charge read (`charges.get`) additionally returns settlement details once paid:
+
+```ts
+const paid = await meshpay.charges.get(reference);
+paid.transaction_reference; // pass to payments.getTransaction()
+paid.session_id;            // NIBSS reference, for tracing with the banks
+```
+
+Both are omitted while the charge is unpaid, and `charges.list` omits them entirely — it doesn't pay for the extra lookup. Note `transaction_id` is an internal uuid and is *not* accepted by `getTransaction`; use `transaction_reference`.
 
 The virtual account is issued **lazily** — `charge.account_id` is empty until the payer first opens the payment page (or you call `issueAccount`).
 
@@ -266,35 +286,104 @@ Network failures and timeouts also throw `MeshpayError`, with `statusCode` of `0
 
 MeshPay signs the raw request body with your business's webhook secret and sends it hex-encoded in `X-MeshPay-Signature`, with the event name in `X-MeshPay-Event`.
 
-Verify against the **raw** body — parsing and re-serialising changes the bytes and breaks the signature.
+Use `constructWebhookEvent` — it verifies the signature and returns a fully typed, discriminated event, so the verify-then-parse order can't be got wrong:
 
 ```ts
 import express from 'express';
-import { verifyWebhookSignature } from '@mesh-coverage/meshpayjs';
+import { constructWebhookEvent, WebhookVerificationError } from '@mesh-coverage/meshpayjs';
 
 const app = express();
 
 app.post(
   '/webhooks/meshpay',
-  express.raw({ type: 'application/json' }),
+  express.raw({ type: 'application/json' }), // raw body, not express.json()
   (req, res) => {
-    const signature = req.header('X-MeshPay-Signature') ?? '';
-
-    if (!verifyWebhookSignature(req.body, signature, process.env.MESHPAY_WEBHOOK_SECRET!)) {
-      return res.sendStatus(401);
+    let event;
+    try {
+      event = constructWebhookEvent(
+        req.body,
+        req.header('X-MeshPay-Signature') ?? '',
+        process.env.MESHPAY_WEBHOOK_SECRET!
+      );
+    } catch (err) {
+      if (err instanceof WebhookVerificationError) return res.sendStatus(401);
+      throw err;
     }
-
-    const event = req.header('X-MeshPay-Event');
-    const payload = JSON.parse(req.body.toString());
 
     // Acknowledge fast; do the work asynchronously.
     res.sendStatus(200);
-    handle(event, payload);
+
+    switch (event.event) {
+      case 'inflow.success':
+        // event.data is TransactionWebhookData
+        credit(event.data.account_ref, event.data.amount_kobo);
+        break;
+      case 'charge.success':
+        // event.data is ChargeWebhookData
+        markInvoicePaid(event.data.trx_reference, event.data.transaction);
+        break;
+      case 'bill.failed':
+        // event.data is BillWebhookData
+        refund(event.data.trx_reference, event.data.metadata?.failure_reason);
+        break;
+    }
   }
 );
 ```
 
-The comparison is constant-time. Failed deliveries are retried by MeshPay, so handlers should be idempotent.
+Pass the **raw** body. Parsing and re-serialising changes the bytes and breaks the signature — with Express that means `express.raw()`, not `express.json()`.
+
+`verifyWebhookSignature(rawBody, signature, secret)` is still exported if you only want the boolean. Both use a constant-time comparison.
+
+### Envelope
+
+Every delivery has the same shape:
+
+```json
+{
+  "event": "inflow.success",
+  "data": { "...": "per-event, see below" },
+  "timestamp": 1753430400
+}
+```
+
+`timestamp` is Unix **seconds**, not milliseconds.
+
+### Events
+
+| Event | `data` type |
+| --- | --- |
+| `inflow.success` | `TransactionWebhookData` |
+| `inflow.reversed` | `TransactionWebhookData` |
+| `transfer.success` | `TransactionWebhookData` |
+| `transfer.failed` | `TransactionWebhookData` |
+| `transfer.reversed` | `TransactionWebhookData` |
+| `pos.charge.success` | `TransactionWebhookData` |
+| `pos.charge.failed` | `TransactionWebhookData` |
+| `bill.success` | `BillWebhookData` |
+| `bill.failed` | `BillWebhookData` |
+| `bill.reversed` | `BillWebhookData` |
+| `charge.success` | `ChargeWebhookData` |
+
+**`TransactionWebhookData`** — `reference`, `trx_reference`, `category`, `status`, `amount_kobo`, `fee_kobo`, `currency`, `settled_at` (null until settled), plus optionally `stamp_duty_kobo` (always on outbound transfers, including `0`), `session_id`, `counterparty`, and — when tied to one of your virtual accounts — `account_ref`, `account_number`, `bank_name`, `customer_ref`.
+
+**`BillWebhookData`** — the same core fields plus `metadata`, which carries `failure_reason` on `bill.failed`.
+
+**`ChargeWebhookData`** — `reference` (the charge), `trx_reference`, `amount_kobo`, `transaction` (MeshPay's reference for the settling transaction — pass it to `getTransaction`), `callback_url`, and optionally `session_id`.
+
+`session_id` sits at `data.session_id` on every event type, never nested elsewhere, so one field position works regardless of which webhook you're handling.
+
+To type a handler for a single event, use `WebhookDataFor`:
+
+```ts
+import type { WebhookDataFor } from '@mesh-coverage/meshpayjs';
+
+function onInflow(data: WebhookDataFor<'inflow.success'>) { /* ... */ }
+```
+
+### Delivery
+
+MeshPay makes one initial attempt plus up to 5 automatic retries (30s, 2m, 10m, 30m, 2h), and a failed delivery can be resent by hand from the dashboard's developer menu. Handlers must therefore be **idempotent** — the same event can arrive more than once. Acknowledge with a 2xx as soon as you've verified and persisted; do the real work afterwards.
 
 ## Authentication details
 

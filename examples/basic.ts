@@ -87,7 +87,8 @@ async function chargeExample(): Promise<void> {
     metadata: { invoice_id: String(runId) }
   });
   console.log('Charge:', charge.reference, charge.status);
-  console.log('  pay at: https://app.meshpay.ng/pay/' + charge.reference);
+  // Hand payment_url to the payer — never build the link yourself.
+  console.log('  pay at:', charge.payment_url);
 
   // 2. What the payer's browser sees — no credentials involved.
   const view = await meshpay.charges.public_.get(charge.reference);

@@ -48,7 +48,8 @@ export class Meshpay {
 export {
   MeshpayClient,
   computeSignature,
-  verifyWebhookSignature
+  verifyWebhookSignature,
+  constructWebhookEvent
 } from './client';
 export type { HttpMethod, RequestOptions } from './client';
 

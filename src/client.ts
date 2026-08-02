@@ -18,7 +18,9 @@ import {
   MeshpayConfig,
   MeshpayError,
   ErrorBody,
-  PRODUCTION_BASE_URL
+  PRODUCTION_BASE_URL,
+  MeshpayWebhookEvent,
+  WebhookVerificationError
 } from './types';
 
 export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
@@ -69,6 +71,62 @@ export function verifyWebhookSignature(
     return false;
   }
   return timingSafeEqual(a, b);
+}
+
+/**
+ * Verifies a webhook delivery and returns it as a typed, discriminated event.
+ *
+ * Prefer this over calling {@link verifyWebhookSignature} yourself — it makes
+ * the verify-then-parse order impossible to get wrong, and hands back a value
+ * you can `switch` on.
+ *
+ * @param rawBody The body exactly as received. Re-serialising a parsed object
+ *   changes the bytes and will fail verification.
+ * @param signature The `X-MeshPay-Signature` header.
+ * @param secret Your business's webhook signing secret.
+ * @throws {WebhookVerificationError} if the signature doesn't match, or the
+ *   body isn't a well-formed event envelope.
+ *
+ * @example
+ * ```ts
+ * const event = constructWebhookEvent(req.body, sig, secret);
+ * if (event.event === 'charge.success') {
+ *   await markInvoicePaid(event.data.trx_reference);
+ * }
+ * ```
+ */
+export function constructWebhookEvent(
+  rawBody: string | Buffer,
+  signature: string,
+  secret: string
+): MeshpayWebhookEvent {
+  if (!verifyWebhookSignature(rawBody, signature, secret)) {
+    throw new WebhookVerificationError(
+      'Webhook signature does not match the request body'
+    );
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8')
+    );
+  } catch {
+    throw new WebhookVerificationError('Webhook body is not valid JSON');
+  }
+
+  const event = parsed as Partial<MeshpayWebhookEvent>;
+  if (
+    typeof event?.event !== 'string' ||
+    typeof event?.data !== 'object' ||
+    event.data === null
+  ) {
+    throw new WebhookVerificationError(
+      'Webhook body is not a MeshPay event envelope'
+    );
+  }
+
+  return event as MeshpayWebhookEvent;
 }
 
 export class MeshpayClient {

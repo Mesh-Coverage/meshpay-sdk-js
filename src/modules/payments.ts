@@ -4,8 +4,8 @@ import { MeshpayClient } from '../client';
 import {
   Transaction,
   CreateTransferRequest,
-  Paginated,
-  PaginationParams
+  ListTransactionsParams,
+  Paginated
 } from '../types';
 
 export class Payments {
@@ -25,13 +25,17 @@ export class Payments {
     );
   }
 
-  /** GET /api/client/transactions */
+  /** GET /api/client/transactions — optionally filtered by category. */
   listTransactions(
-    params: PaginationParams = {}
+    params: ListTransactionsParams = {}
   ): Promise<Paginated<Transaction>> {
     return this.client.get<Paginated<Transaction>>(
       '/api/client/transactions',
-      { limit: params.limit, offset: params.offset }
+      {
+        limit: params.limit,
+        offset: params.offset,
+        category: params.category
+      }
     );
   }
 

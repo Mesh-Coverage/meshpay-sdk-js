@@ -202,6 +202,29 @@ export type TransactionCategory =
   | 'POS_TRANSFER'
   | 'CHARGE';
 
+/**
+ * Sender/recipient bank details. Which fields are populated depends on the
+ * direction: inflows carry the payer's details, outbound transfers carry the
+ * recipient's.
+ */
+export interface Counterparty {
+  /** Inflows — the rail that reported the payment, e.g. "nomba". */
+  provider?: string;
+  /** Inflows — the provider's retrieval reference number. */
+  rrn?: string;
+  /** Inflows — the payer's own bank details, when the provider supplied them. */
+  sender_name?: string;
+  sender_bank_name?: string;
+  sender_bank_code?: string;
+  sender_account_number?: string;
+  /** Outbound transfers — where the money was sent. */
+  bank_code?: string;
+  account_number?: string;
+  account_name?: string;
+  narration?: string;
+  [key: string]: unknown;
+}
+
 export interface Transaction {
   id: string;
   business_id: string;
@@ -213,18 +236,40 @@ export interface Transaction {
   category: TransactionCategory;
   status: TransactionStatus;
   amount_kobo: number;
+  /** MeshPay's own charge. */
   fee_kobo: number;
+  /**
+   * Statutory stamp duty on an outbound transfer, levied by the provider and
+   * passed through at cost. This is *not* part of `fee_kobo` — the two add
+   * rather than overlap. Always 0 for anything that isn't an outbound
+   * transfer.
+   */
+  stamp_duty_kobo: number;
+  /**
+   * Total movement against the wallet. For an outbound transfer that is
+   * `amount_kobo + fee_kobo + stamp_duty_kobo`.
+   */
   net_amount_kobo: number;
   currency: string;
   account_id?: string;
   customer_id?: string;
   terminal_id?: string;
   metadata?: Record<string, unknown>;
-  /** Sender/recipient bank details, when known. */
-  counterparty?: Record<string, unknown>;
+  counterparty?: Counterparty;
+  /**
+   * The provider's NIBSS session identifier — the reference the payer's or
+   * recipient's own bank shows them, quoted when tracing or disputing a
+   * payment with the banks.
+   */
+  session_id?: string;
   settled_at?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface ListTransactionsParams extends PaginationParams {
+  /** Restrict to a single category, e.g. `'TRANSFER'`. */
+  category?: TransactionCategory;
 }
 
 export interface CreateTransferRequest {
@@ -307,9 +352,35 @@ export interface Charge {
   payer_email: string;
   amount_kobo: number;
   status: ChargeStatus;
+  /**
+   * The link to hand the payer — the charge's `reference` appended to the
+   * payment base URL MeshPay has configured for your environment.
+   *
+   * Present on every merchant-facing charge response. Absent only if no base
+   * URL is configured server-side at all, which means charges cannot be paid
+   * — treat its absence as a misconfiguration worth alerting on rather than
+   * building the URL yourself.
+   */
+  payment_url?: string;
+  /**
+   * MeshPay's reference for the settling transaction — the value
+   * {@link Payments.getTransaction} accepts. Populated only on a
+   * single-charge read (`charges.get`), and only once paid; `charges.list`
+   * omits it.
+   */
+  transaction_reference?: string;
+  /**
+   * The provider's NIBSS session id for the payment, quoted when tracing it
+   * with the banks. Same single-read caveat as `transaction_reference`.
+   */
+  session_id?: string;
   /** The one-off virtual account, once issued (issuance is lazy). */
   account_id?: string;
-  /** Set once a matching inflow settles the charge. */
+  /**
+   * Set once a matching inflow settles the charge. This is an internal uuid
+   * and is *not* accepted by `GET /transactions/{reference}` — use
+   * `transaction_reference` for that.
+   */
   transaction_id?: string;
   expires_at?: string;
   callback_url?: string;
@@ -399,10 +470,161 @@ export const WEBHOOK_SIGNATURE_HEADER = 'X-MeshPay-Signature';
 /** Header carrying the event name. */
 export const WEBHOOK_EVENT_HEADER = 'X-MeshPay-Event';
 
-export interface WebhookEvent<T = unknown> {
-  event: string;
-  data: T;
-  [key: string]: unknown;
+/** Every event MeshPay sends to a business's configured webhook URL. */
+export type WebhookEventName =
+  /** Funds landed in one of your virtual accounts. */
+  | 'inflow.success'
+  /** A previously successful inflow was reversed by the provider. */
+  | 'inflow.reversed'
+  /** An outbound transfer settled. */
+  | 'transfer.success'
+  /** An outbound transfer failed; funds are returned to your wallet. */
+  | 'transfer.failed'
+  /** A previously successful transfer was reversed. */
+  | 'transfer.reversed'
+  /** A card payment on a POS terminal succeeded. */
+  | 'pos.charge.success'
+  /** A card payment on a POS terminal failed. */
+  | 'pos.charge.failed'
+  /** An airtime/data/electricity/cable purchase completed. */
+  | 'bill.success'
+  /** A bill purchase failed; funds are returned to your wallet. */
+  | 'bill.failed'
+  /** A previously successful bill purchase was reversed. */
+  | 'bill.reversed'
+  /** A payment link was settled by the payer. */
+  | 'charge.success';
+
+/**
+ * Payload for the transaction-shaped events: inflows, transfers and POS
+ * card charges.
+ */
+export interface TransactionWebhookData {
+  /** MeshPay's own reference. */
+  reference: string;
+  /** Your idempotency key, as supplied on create. */
+  trx_reference: string;
+  category: TransactionCategory;
+  status: TransactionStatus;
+  amount_kobo: number;
+  /** MeshPay's own charge. */
+  fee_kobo: number;
+  /**
+   * Statutory stamp duty, separate from `fee_kobo` so the two reconcile
+   * independently — the wallet movement is
+   * `amount_kobo + fee_kobo + stamp_duty_kobo`.
+   *
+   * Always present on outbound transfers, including as `0` below the
+   * threshold, so its absence never has to be read as "zero" versus "not
+   * applicable". Omitted entirely on categories that can't attract it.
+   */
+  stamp_duty_kobo?: number;
+  currency: string;
+  /** Null until the transaction settles. */
+  settled_at: string | null;
+  /**
+   * The provider's NIBSS session id. Always at this position on every event
+   * type; omitted when the provider gave us none.
+   */
+  session_id?: string;
+  counterparty?: Counterparty;
+  /**
+   * The reference you supplied when creating the virtual account the funds
+   * landed in. Present when the transaction is tied to one.
+   */
+  account_ref?: string;
+  account_number?: string;
+  bank_name?: string;
+  /** The `external_ref` of the customer linked to that account, if any. */
+  customer_ref?: string;
+}
+
+/** Payload for `bill.success`, `bill.failed` and `bill.reversed`. */
+export interface BillWebhookData {
+  reference: string;
+  trx_reference: string;
+  category: TransactionCategory;
+  status: TransactionStatus;
+  amount_kobo: number;
+  fee_kobo: number;
+  currency: string;
+  settled_at: string | null;
+  /** Carries `failure_reason` on `bill.failed`. */
+  metadata?: Record<string, unknown> & { failure_reason?: string };
+  /** Rarely present — bill vends don't usually settle over NIBSS. */
+  session_id?: string;
+}
+
+/** Payload for `charge.success`. */
+export interface ChargeWebhookData {
+  /** The charge's public reference. */
+  reference: string;
+  /** The `trx_reference` you supplied when creating the charge. */
+  trx_reference: string;
+  amount_kobo: number;
+  /**
+   * MeshPay's reference for the settling transaction — pass this to
+   * {@link Payments.getTransaction}.
+   */
+  transaction: string;
+  /** The redirect you configured on the charge, echoed back. */
+  callback_url: string;
+  session_id?: string;
+}
+
+/** The envelope every webhook body uses. */
+export interface WebhookEnvelope<
+  E extends WebhookEventName = WebhookEventName,
+  D = unknown
+> {
+  event: E;
+  data: D;
+  /** Send time, Unix **seconds** (not milliseconds). */
+  timestamp: number;
+}
+
+/**
+ * A received webhook, discriminated on `event` — narrowing on it gives you
+ * the right `data` shape.
+ *
+ * @example
+ * ```ts
+ * switch (event.event) {
+ *   case 'inflow.success':
+ *     event.data.account_ref; // typed
+ *     break;
+ *   case 'charge.success':
+ *     event.data.transaction; // typed
+ *     break;
+ * }
+ * ```
+ */
+export type MeshpayWebhookEvent =
+  | WebhookEnvelope<'inflow.success', TransactionWebhookData>
+  | WebhookEnvelope<'inflow.reversed', TransactionWebhookData>
+  | WebhookEnvelope<'transfer.success', TransactionWebhookData>
+  | WebhookEnvelope<'transfer.failed', TransactionWebhookData>
+  | WebhookEnvelope<'transfer.reversed', TransactionWebhookData>
+  | WebhookEnvelope<'pos.charge.success', TransactionWebhookData>
+  | WebhookEnvelope<'pos.charge.failed', TransactionWebhookData>
+  | WebhookEnvelope<'bill.success', BillWebhookData>
+  | WebhookEnvelope<'bill.failed', BillWebhookData>
+  | WebhookEnvelope<'bill.reversed', BillWebhookData>
+  | WebhookEnvelope<'charge.success', ChargeWebhookData>;
+
+/** Narrows {@link MeshpayWebhookEvent} to the payload for a given event. */
+export type WebhookDataFor<E extends WebhookEventName> = Extract<
+  MeshpayWebhookEvent,
+  { event: E }
+>['data'];
+
+/** Thrown by `constructWebhookEvent` when a delivery can't be trusted. */
+export class WebhookVerificationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WebhookVerificationError';
+    Object.setPrototypeOf(this, WebhookVerificationError.prototype);
+  }
 }
 
 // ============================================================================
