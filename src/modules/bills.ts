@@ -13,14 +13,7 @@ import {
 export class Bills {
   constructor(private readonly client: MeshpayClient) {}
 
-  /**
-   * POST /api/client/bills/pay
-   *
-   * Which fields are required depends on `type`:
-   * - `airtime` / `data`: `phone_number`, `network`
-   * - `electricity`: `disco`, `meter_type`, `customer_id`
-   * - `cabletv`: `cable_tv_type`, `customer_id`
-   */
+  /** Pay for airtime, data, electricity, or cable TV. */
   pay(request: PayBillRequest): Promise<Transaction> {
     return this.client.post<Transaction>('/api/client/bills/pay', request);
   }

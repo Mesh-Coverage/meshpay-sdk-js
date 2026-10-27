@@ -255,6 +255,8 @@ export interface Transaction {
   customer_id?: string;
   terminal_id?: string;
   metadata?: Record<string, unknown>;
+  /** Electricity vend token, when supplied by the provider. */
+  token?: string;
   counterparty?: Counterparty;
   /**
    * The provider's NIBSS session identifier — the reference the payer's or
@@ -292,26 +294,34 @@ export interface CreateTransferRequest {
 
 export type BillType = 'airtime' | 'data' | 'electricity' | 'cabletv';
 
-export interface PayBillRequest {
-  type: BillType;
-  /** Decimal naira amount, e.g. "1000.00" or 1000. */
+interface PayBillBase {
+  /** Amount in naira, e.g. "1000.00". */
   amount: string | number;
-  /** airtime, data */
-  phone_number?: string;
-  /** airtime, data — e.g. "MTN". */
-  network?: string;
-  /** electricity — the disco code. */
-  disco?: string;
-  /** electricity — "prepaid" | "postpaid". */
-  meter_type?: string;
-  /** cabletv — the provider/package type. */
-  cable_tv_type?: string;
-  /** electricity, cabletv — meter or smartcard number. */
-  customer_id?: string;
-  payer_name?: string;
-  /** Your idempotency key. Required, unique per business. */
+  /** Your unique idempotency key. */
   trx_reference: string;
+  payer_name?: string;
 }
+
+export type PayBillRequest =
+  | (PayBillBase & {
+      type: 'airtime' | 'data';
+      phone_number: string;
+      network: string;
+    })
+  | (PayBillBase & {
+      type: 'electricity';
+      /** Electricity distributor code. */
+      disco: string;
+      /** Meter number. */
+      customer_id: string;
+      meter_type?: 'prepaid' | 'postpaid';
+    })
+  | (PayBillBase & {
+      type: 'cabletv';
+      cable_tv_type: string;
+      /** Smartcard or decoder number. */
+      customer_id: string;
+    });
 
 export interface DataPlan {
   [key: string]: unknown;
@@ -551,7 +561,8 @@ export interface BillWebhookData {
   settled_at: string | null;
   /** Carries `failure_reason` on `bill.failed`. */
   metadata?: Record<string, unknown> & { failure_reason?: string };
-  /** Rarely present — bill vends don't usually settle over NIBSS. */
+  /** Electricity vend token, when supplied by the provider. */
+  token?: string;
   session_id?: string;
 }
 

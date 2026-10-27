@@ -132,13 +132,11 @@ const bills = await meshpay.payments.listTransactions({ category: 'BILL' });
 const txn = await meshpay.payments.getTransaction('payout-1042');
 ```
 
-On an outbound transfer the wallet movement is `amount_kobo + fee_kobo + stamp_duty_kobo`. Stamp duty is statutory, levied by the provider and passed through at cost, so it's tracked separately from `fee_kobo` (MeshPay's own charge) rather than folded into it. `net_amount_kobo` is the total of all three.
-
-`session_id` is the provider's NIBSS reference — what the payer's or recipient's own bank shows them, and what you quote when tracing a payment with the banks.
+For transfers, `net_amount_kobo` includes the amount, MeshPay fee, and stamp duty. `session_id` is the provider's bank-tracing reference.
 
 ### Charges (payment links)
 
-A charge is a one-off request for a fixed amount. The payer settles it by transferring into a dedicated, expiring virtual account — no MeshPay account needed on their side.
+Create a payment link for a fixed amount. The payer pays by bank transfer.
 
 ```ts
 const charge = await meshpay.charges.create({
@@ -157,9 +155,7 @@ const { data } = await meshpay.charges.list({ limit: 20 });
 const one = await meshpay.charges.get(charge.reference);
 ```
 
-`payment_url` is returned on every merchant-facing charge response. It's absent only if no payment base URL is configured server-side, which means charges can't be paid at all — worth alerting on rather than falling back to a hand-built URL.
-
-A single-charge read (`charges.get`) additionally returns settlement details once paid:
+Use the returned `payment_url` as the payer link. A single-charge read returns settlement details after payment:
 
 ```ts
 const paid = await meshpay.charges.get(reference);
@@ -167,13 +163,11 @@ paid.transaction_reference; // pass to payments.getTransaction()
 paid.session_id;            // NIBSS reference, for tracing with the banks
 ```
 
-Both are omitted while the charge is unpaid, and `charges.list` omits them entirely — it doesn't pay for the extra lookup. Note `transaction_id` is an internal uuid and is *not* accepted by `getTransaction`; use `transaction_reference`.
-
-The virtual account is issued **lazily** — `charge.account_id` is empty until the payer first opens the payment page (or you call `issueAccount`).
+Use `transaction_reference` with `payments.getTransaction` to retrieve the transaction. `charges.list` does not include settlement details.
 
 #### Building your own payment page
 
-`meshpay.charges.public_` calls the `/api/pay` surface, which takes no credentials — the payer authenticates by knowing the reference alone. These are safe to call from a browser.
+`meshpay.charges.public_` provides unauthenticated methods for the payer-facing page.
 
 ```ts
 // Render the page
@@ -189,7 +183,7 @@ const status = await meshpay.charges.public_.getStatus(reference);
 // status.status is 'pending' | 'paid' | 'expired'
 ```
 
-A charge's status moves to `paid` automatically when a matching inflow lands, and you receive a webhook. Polling is for the payer's browser; don't rely on it server-side.
+A matching inflow changes the charge status to `paid` and triggers a webhook.
 
 ### Customers
 
@@ -220,32 +214,42 @@ Returned customers are PII-masked: `bvn` and `nin` come back masked, never in th
 ### Bills
 
 ```ts
-await meshpay.bills.pay({
-  type: 'airtime',
-  amount: '500.00',
-  phone_number: '+2348012345678',
-  network: 'MTN',
-  trx_reference: 'airtime-8891'
-});
-
-const plans = await meshpay.bills.listDataPlans('MTN');
-const discos = await meshpay.bills.listElectricityProviders();
-
-// Confirm who you're paying before charging the customer
-const biller = await meshpay.bills.lookupCustomer({
+const result = await meshpay.bills.pay({
   type: 'electricity',
-  provider_id: 'ikeja-electric',
-  customer_id: '01234567890'   // meter number
+  amount: '1500.00',
+  disco: 'abuja',
+  customer_id: '95300029980',
+  meter_type: 'prepaid',
+  trx_reference: 'meter-1042'
 });
+
+if (result.token) console.log(result.token);
+if (result.status === 'PENDING') {
+  // After bill.success, read the transaction for its final status and token.
+  const latest = await meshpay.payments.getTransaction(result.reference);
+  console.log(latest.status, latest.token);
+}
 ```
 
-Required fields vary by `type`:
+`pay()` returns a `Transaction`. Electricity responses include `token` when Nomba returns it synchronously. If the transaction is `PENDING`, the token may arrive later; retrieve the transaction by its `reference` to get the updated status and token.
 
-| Type | Additional required fields |
+Required fields:
+
+| Type | Fields |
 | --- | --- |
 | `airtime`, `data` | `phone_number`, `network` |
-| `electricity` | `disco`, `meter_type`, `customer_id` |
+| `electricity` | `disco`, `customer_id`; `meter_type` is optional |
 | `cabletv` | `cable_tv_type`, `customer_id` |
+
+```ts
+const plans = await meshpay.bills.listDataPlans('MTN');
+const discos = await meshpay.bills.listElectricityProviders();
+const customer = await meshpay.bills.lookupCustomer({
+  type: 'electricity',
+  provider_id: 'abuja',
+  customer_id: '95300029980'
+});
+```
 
 ### Identity
 
@@ -284,9 +288,7 @@ Network failures and timeouts also throw `MeshpayError`, with `statusCode` of `0
 
 ## Webhooks
 
-MeshPay signs the raw request body with your business's webhook secret and sends it hex-encoded in `X-MeshPay-Signature`, with the event name in `X-MeshPay-Event`.
-
-Use `constructWebhookEvent` — it verifies the signature and returns a fully typed, discriminated event, so the verify-then-parse order can't be got wrong:
+Verify webhook signatures with `constructWebhookEvent` before handling the event:
 
 ```ts
 import express from 'express';
@@ -331,13 +333,11 @@ app.post(
 );
 ```
 
-Pass the **raw** body. Parsing and re-serialising changes the bytes and breaks the signature — with Express that means `express.raw()`, not `express.json()`.
-
-`verifyWebhookSignature(rawBody, signature, secret)` is still exported if you only want the boolean. Both use a constant-time comparison.
+Pass the raw request body to verify its signature. With Express, use `express.raw()` on this route.
 
 ### Envelope
 
-Every delivery has the same shape:
+Webhook envelope:
 
 ```json
 {
@@ -347,7 +347,6 @@ Every delivery has the same shape:
 }
 ```
 
-`timestamp` is Unix **seconds**, not milliseconds.
 
 ### Events
 
@@ -371,8 +370,6 @@ Every delivery has the same shape:
 
 **`ChargeWebhookData`** — `reference` (the charge), `trx_reference`, `amount_kobo`, `transaction` (MeshPay's reference for the settling transaction — pass it to `getTransaction`), `callback_url`, and optionally `session_id`.
 
-`session_id` sits at `data.session_id` on every event type, never nested elsewhere, so one field position works regardless of which webhook you're handling.
-
 To type a handler for a single event, use `WebhookDataFor`:
 
 ```ts
@@ -383,11 +380,11 @@ function onInflow(data: WebhookDataFor<'inflow.success'>) { /* ... */ }
 
 ### Delivery
 
-MeshPay makes one initial attempt plus up to 5 automatic retries (30s, 2m, 10m, 30m, 2h), and a failed delivery can be resent by hand from the dashboard's developer menu. Handlers must therefore be **idempotent** — the same event can arrive more than once. Acknowledge with a 2xx as soon as you've verified and persisted; do the real work afterwards.
+Webhooks are retried up to five times. Make handlers idempotent and return 2xx after verifying and recording the event.
 
 ## Authentication details
 
-You rarely need this — the SDK signs for you — but for reference, each request carries:
+The SDK signs requests with these headers:
 
 | Header | Value |
 | --- | --- |
@@ -395,8 +392,6 @@ You rarely need this — the SDK signs for you — but for reference, each reque
 | `x-timestamp` | Unix milliseconds |
 | `x-nonce` | unique random value per request |
 | `x-signature` | `hex(HMAC-SHA256(secret, "{appId}.{timestamp}.{nonce}"))` |
-
-The request body is **not** part of the signature. Timestamps outside the server's skew window are rejected, as are repeated nonces.
 
 `computeSignature` is exported if you need to sign requests made outside this SDK:
 
@@ -408,7 +403,7 @@ const signature = computeSignature(secret, appId, Date.now().toString(), nonce);
 
 ## Escape hatch
 
-For endpoints the SDK doesn't wrap yet, use the transport directly — signing and error handling still apply:
+Use the client directly for endpoints without a dedicated method:
 
 ```ts
 const result = await meshpay.client.get<MyType>('/api/client/some-endpoint', {

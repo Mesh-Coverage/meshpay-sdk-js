@@ -5,7 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.4] - 2026-10-27
+### Updated
+
+- Bill payment responses and `bill.success` webhook data expose the electricity vend `token`.
+- `PayBillRequest` now requires fields by bill type; electricity `meter_type` is optional.
+- README bill-payment guidance covers pending responses and concise retrieval steps.
 
 ## [0.1.3] - 2026-08-02
 ### Added
